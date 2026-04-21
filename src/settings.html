@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voucher App Settings</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f3efe6;
+      --panel: rgba(255, 252, 246, 0.95);
+      --ink: #1f2937;
+      --muted: #6b7280;
+      --line: rgba(31, 41, 55, 0.12);
+      --accent: #0f766e;
+      --accent-strong: #115e59;
+      --shadow: 0 18px 40px rgba(31, 41, 55, 0.12);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(15, 118, 110, 0.15), transparent 30%),
+        linear-gradient(180deg, #f7f3ea 0%, var(--bg) 100%);
+      min-height: 100vh;
+    }
+
+    .shell {
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 28px;
+    }
+
+    .hero {
+      margin-bottom: 20px;
+    }
+
+    .hero h1 {
+      margin: 0 0 8px;
+      font-size: 2rem;
+      letter-spacing: 0.02em;
+    }
+
+    .hero p {
+      margin: 0;
+      color: var(--muted);
+      max-width: 60ch;
+    }
+
+    form {
+      display: grid;
+      gap: 18px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 18px;
+      box-shadow: var(--shadow);
+    }
+
+    .card h2 {
+      margin: 0 0 14px;
+      font-size: 1.15rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .field {
+      display: grid;
+      gap: 6px;
+    }
+
+    .field.full {
+      grid-column: 1 / -1;
+    }
+
+    label {
+      font-size: 0.95rem;
+      color: var(--muted);
+    }
+
+    input,
+    select {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(31, 41, 55, 0.16);
+      background: rgba(255, 255, 255, 0.9);
+      color: var(--ink);
+      font: inherit;
+    }
+
+    input[type="checkbox"] {
+      width: auto;
+      transform: scale(1.15);
+      accent-color: var(--accent);
+    }
+
+    .toggle {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 44px;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 11px 16px;
+      font: inherit;
+      cursor: pointer;
+      color: white;
+      background: var(--accent);
+      transition: transform 120ms ease, background 120ms ease;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+      background: var(--accent-strong);
+    }
+
+    button.secondary {
+      background: #475569;
+    }
+
+    button.ghost {
+      background: #d97706;
+    }
+
+    .status {
+      min-height: 1.4rem;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .note {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin-top: 8px;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 96px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(31, 41, 55, 0.16);
+      background: rgba(255, 255, 255, 0.9);
+      color: var(--ink);
+      font: inherit;
+      resize: vertical;
+    }
+
+    @media (max-width: 720px) {
+      .shell {
+        padding: 16px;
+      }
+
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="hero">
+      <h1>App Settings</h1>
+      <p>Edit credentials, target URL behavior, refresh settings, and the target URL info panel without touching the JSON file directly.</p>
+    </div>
+
+    <form id="settings-form">
+      <section class="card">
+        <h2>Navigation</h2>
+        <div class="grid">
+          <div class="field full">
+            <label for="startUrl">Start URL</label>
+            <input id="startUrl" name="startUrl" type="url">
+          </div>
+          <div class="field full">
+            <label for="targetUrl">Target URL</label>
+            <input id="targetUrl" name="targetUrl" type="url">
+          </div>
+          <div class="field">
+            <label for="classId">Class ID</label>
+            <input id="classId" name="classId" type="text">
+          </div>
+          <div class="field">
+            <label for="assetId">Asset ID</label>
+            <input id="assetId" name="assetId" type="text">
+          </div>
+        </div>
+        <div class="note">When you capture the current page, the app stores `classID` and `assetID` separately and rewrites matching target URLs into a reusable template using `{{CLASS_ID}}` and `{{ASSET_ID}}`.</div>
+      </section>
+
+      <section class="card">
+        <h2>Credentials</h2>
+        <div class="grid">
+          <div class="field">
+            <label for="username">Username</label>
+            <input id="username" name="username" type="text" autocomplete="username">
+          </div>
+          <div class="field">
+            <label for="password">Password</label>
+            <input id="password" name="password" type="password" autocomplete="current-password">
+          </div>
+          <div class="field full">
+            <label for="loggedInSelector">Already logged in selector</label>
+            <input id="loggedInSelector" name="loggedInSelector" type="text">
+          </div>
+        </div>
+        <div class="note">If the start page sometimes shows an existing-session banner instead of the login inputs, set its selector here so the app can skip typing credentials and jump directly to the saved target.</div>
+      </section>
+
+      <section class="card">
+        <h2>Refresh</h2>
+        <div class="grid">
+          <div class="field toggle">
+            <input id="refreshEnabled" name="refreshEnabled" type="checkbox">
+            <label for="refreshEnabled">Enable automatic refresh</label>
+          </div>
+          <div class="field">
+            <label for="refreshIntervalSeconds">Interval seconds</label>
+            <input id="refreshIntervalSeconds" name="refreshIntervalSeconds" type="number" min="1">
+          </div>
+          <div class="field">
+            <label for="refreshStrategy">Refresh strategy</label>
+            <select id="refreshStrategy" name="refreshStrategy">
+              <option value="goto">Go to target URL</option>
+              <option value="reload">Reload current page</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="timeoutMs">Load timeout (ms)</label>
+            <input id="timeoutMs" name="timeoutMs" type="number" min="1000" step="1000">
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Session Recovery</h2>
+        <div class="grid">
+          <div class="field toggle">
+            <input id="sessionRecoveryEnabled" name="sessionRecoveryEnabled" type="checkbox">
+            <label for="sessionRecoveryEnabled">Restart automation when the session drops or the page redirects away from the target</label>
+          </div>
+          <div class="field">
+            <label for="sessionRecoveryCooldownMs">Recovery cooldown (ms)</label>
+            <input id="sessionRecoveryCooldownMs" name="sessionRecoveryCooldownMs" type="number" min="1000" step="1000">
+          </div>
+          <div class="field">
+            <label for="sessionRecoveryDelayMs">Restart delay (ms)</label>
+            <input id="sessionRecoveryDelayMs" name="sessionRecoveryDelayMs" type="number" min="0" step="100">
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Weekly Logout Schedule</h2>
+        <div class="grid">
+          <div class="field toggle">
+            <input id="accessScheduleEnabled" name="accessScheduleEnabled" type="checkbox">
+            <label for="accessScheduleEnabled">Force logout and block access during scheduled windows</label>
+          </div>
+          <div class="field">
+            <label for="accessScheduleCheckIntervalSeconds">Schedule check interval (seconds)</label>
+            <input id="accessScheduleCheckIntervalSeconds" name="accessScheduleCheckIntervalSeconds" type="number" min="5" step="5">
+          </div>
+          <div class="field full">
+            <label for="blockedMessage">Blocked message</label>
+            <input id="blockedMessage" name="blockedMessage" type="text">
+          </div>
+          <div class="field full">
+            <label for="scheduleMonday">Monday blocked ranges</label>
+            <textarea id="scheduleMonday" name="scheduleMonday" placeholder="09:00-12:00, 14:00-18:00"></textarea>
+          </div>
+          <div class="field full">
+            <label for="scheduleTuesday">Tuesday blocked ranges</label>
+            <textarea id="scheduleTuesday" name="scheduleTuesday" placeholder="09:00-12:00"></textarea>
+          </div>
+          <div class="field full">
+            <label for="scheduleWednesday">Wednesday blocked ranges</label>
+            <textarea id="scheduleWednesday" name="scheduleWednesday"></textarea>
+          </div>
+          <div class="field full">
+            <label for="scheduleThursday">Thursday blocked ranges</label>
+            <textarea id="scheduleThursday" name="scheduleThursday"></textarea>
+          </div>
+          <div class="field full">
+            <label for="scheduleFriday">Friday blocked ranges</label>
+            <textarea id="scheduleFriday" name="scheduleFriday"></textarea>
+          </div>
+          <div class="field full">
+            <label for="scheduleSaturday">Saturday blocked ranges</label>
+            <textarea id="scheduleSaturday" name="scheduleSaturday"></textarea>
+          </div>
+          <div class="field full">
+            <label for="scheduleSunday">Sunday blocked ranges</label>
+            <textarea id="scheduleSunday" name="scheduleSunday"></textarea>
+          </div>
+        </div>
+        <div class="note">Use comma-separated or line-separated ranges in `HH:MM-HH:MM` format. Overnight windows are supported, for example `22:00-06:00`.</div>
+      </section>
+
+      <section class="card">
+        <h2>Window And Panel</h2>
+        <div class="grid">
+          <div class="field">
+            <label for="windowWidth">Window width</label>
+            <input id="windowWidth" name="windowWidth" type="number" min="800">
+          </div>
+          <div class="field">
+            <label for="windowHeight">Window height</label>
+            <input id="windowHeight" name="windowHeight" type="number" min="600">
+          </div>
+          <div class="field toggle">
+            <input id="infoPanelEnabled" name="infoPanelEnabled" type="checkbox">
+            <label for="infoPanelEnabled">Show target URL panel</label>
+          </div>
+          <div class="field toggle">
+            <input id="showPageUrlWhenIdle" name="showPageUrlWhenIdle" type="checkbox">
+            <label for="showPageUrlWhenIdle">Show page URL when idle</label>
+          </div>
+          <div class="field">
+            <label for="infoPanelPosition">Panel position</label>
+            <select id="infoPanelPosition" name="infoPanelPosition">
+              <option value="bottom-right">Bottom right</option>
+              <option value="bottom-left">Bottom left</option>
+              <option value="top-right">Top right</option>
+              <option value="top-left">Top left</option>
+            </select>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Actions</h2>
+        <div class="actions">
+          <button type="submit">Save Settings</button>
+          <button id="capture-button" class="ghost" type="button">Capture Current URL As Target</button>
+          <button id="navigate-button" class="secondary" type="button">Navigate To Saved Target</button>
+          <button id="restart-button" class="secondary" type="button">Restart Automation</button>
+        </div>
+        <div id="status" class="status"></div>
+      </section>
+    </form>
+  </div>
+
+  <script>
+    const form = document.getElementById('settings-form');
+    const status = document.getElementById('status');
+    const captureButton = document.getElementById('capture-button');
+    const navigateButton = document.getElementById('navigate-button');
+    const restartButton = document.getElementById('restart-button');
+
+    function setStatus(message, isError) {
+      status.textContent = message || '';
+      status.style.color = isError ? '#b91c1c' : '#6b7280';
+    }
+
+    function populateForm(config) {
+      const weekly = config.accessSchedule?.weekly || {};
+      form.startUrl.value = config.startUrl || '';
+      form.targetUrl.value = config.targetUrl || '';
+      form.classId.value = config.route?.classId || '';
+      form.assetId.value = config.route?.assetId || '';
+      form.username.value = config.credentials?.username || '';
+      form.password.value = config.credentials?.password || '';
+      form.loggedInSelector.value = config.authState?.loggedInSelector || '';
+      form.refreshEnabled.checked = config.refresh?.enabled !== false;
+      form.refreshIntervalSeconds.value = config.refresh?.intervalSeconds || 60;
+      form.refreshStrategy.value = config.refresh?.strategy || 'goto';
+      form.timeoutMs.value = config.refresh?.timeoutMs || 30000;
+      form.sessionRecoveryEnabled.checked = config.sessionRecovery?.enabled !== false;
+      form.sessionRecoveryCooldownMs.value = config.sessionRecovery?.cooldownMs || 15000;
+      form.sessionRecoveryDelayMs.value = config.sessionRecovery?.restartDelayMs || 1200;
+      form.accessScheduleEnabled.checked = config.accessSchedule?.enabled === true;
+      form.accessScheduleCheckIntervalSeconds.value = config.accessSchedule?.checkIntervalSeconds || 30;
+      form.blockedMessage.value = config.accessSchedule?.blockedMessage || '';
+      form.scheduleMonday.value = (weekly.monday || []).join(', ');
+      form.scheduleTuesday.value = (weekly.tuesday || []).join(', ');
+      form.scheduleWednesday.value = (weekly.wednesday || []).join(', ');
+      form.scheduleThursday.value = (weekly.thursday || []).join(', ');
+      form.scheduleFriday.value = (weekly.friday || []).join(', ');
+      form.scheduleSaturday.value = (weekly.saturday || []).join(', ');
+      form.scheduleSunday.value = (weekly.sunday || []).join(', ');
+      form.windowWidth.value = config.window?.width || 1440;
+      form.windowHeight.value = config.window?.height || 960;
+      form.infoPanelEnabled.checked = config.infoPanel?.enabled !== false;
+      form.showPageUrlWhenIdle.checked = config.infoPanel?.showPageUrlWhenIdle !== false;
+      form.infoPanelPosition.value = config.infoPanel?.position || 'bottom-right';
+    }
+
+    function readUpdates() {
+      const parseRanges = (value) => value
+        .split(/[,\n]/)
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+
+      return {
+        startUrl: form.startUrl.value.trim(),
+        targetUrl: form.targetUrl.value.trim(),
+        route: {
+          classId: form.classId.value.trim(),
+          assetId: form.assetId.value.trim()
+        },
+        credentials: {
+          username: form.username.value.trim(),
+          password: form.password.value
+        },
+        authState: {
+          loggedInSelector: form.loggedInSelector.value.trim()
+        },
+        refresh: {
+          enabled: form.refreshEnabled.checked,
+          intervalSeconds: Number(form.refreshIntervalSeconds.value || 60),
+          strategy: form.refreshStrategy.value,
+          timeoutMs: Number(form.timeoutMs.value || 30000),
+          url: '{{TARGET_URL}}'
+        },
+        sessionRecovery: {
+          enabled: form.sessionRecoveryEnabled.checked,
+          cooldownMs: Number(form.sessionRecoveryCooldownMs.value || 15000),
+          restartDelayMs: Number(form.sessionRecoveryDelayMs.value || 1200)
+        },
+        accessSchedule: {
+          enabled: form.accessScheduleEnabled.checked,
+          checkIntervalSeconds: Number(form.accessScheduleCheckIntervalSeconds.value || 30),
+          blockedMessage: form.blockedMessage.value.trim(),
+          weekly: {
+            monday: parseRanges(form.scheduleMonday.value),
+            tuesday: parseRanges(form.scheduleTuesday.value),
+            wednesday: parseRanges(form.scheduleWednesday.value),
+            thursday: parseRanges(form.scheduleThursday.value),
+            friday: parseRanges(form.scheduleFriday.value),
+            saturday: parseRanges(form.scheduleSaturday.value),
+            sunday: parseRanges(form.scheduleSunday.value)
+          }
+        },
+        window: {
+          width: Number(form.windowWidth.value || 1440),
+          height: Number(form.windowHeight.value || 960)
+        },
+        infoPanel: {
+          enabled: form.infoPanelEnabled.checked,
+          showPageUrlWhenIdle: form.showPageUrlWhenIdle.checked,
+          position: form.infoPanelPosition.value
+        }
+      };
+    }
+
+    async function refreshForm() {
+      const config = await window.voucherSettings.getConfig();
+      populateForm(config);
+    }
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      setStatus('Saving settings...', false);
+
+      try {
+        const config = await window.voucherSettings.saveConfig(readUpdates());
+        populateForm(config);
+        setStatus('Settings saved.', false);
+      } catch (error) {
+        setStatus(error.message, true);
+      }
+    });
+
+    captureButton.addEventListener('click', async () => {
+      setStatus('Capturing current URL...', false);
+
+      try {
+        const config = await window.voucherSettings.captureTargetUrl();
+        populateForm(config);
+        setStatus('Captured current URL, persisted classID and assetID separately, and normalized the target URL for refresh.', false);
+      } catch (error) {
+        setStatus(error.message, true);
+      }
+    });
+
+    navigateButton.addEventListener('click', async () => {
+      setStatus('Navigating to saved target...', false);
+
+      try {
+        await window.voucherSettings.saveConfig(readUpdates());
+        await window.voucherSettings.navigateToTarget();
+        setStatus('Navigated to the saved target URL.', false);
+      } catch (error) {
+        setStatus(error.message, true);
+      }
+    });
+
+    restartButton.addEventListener('click', async () => {
+      setStatus('Restarting automation...', false);
+
+      try {
+        await window.voucherSettings.saveConfig(readUpdates());
+        await window.voucherSettings.restartAutomation();
+        setStatus('Automation restarted.', false);
+      } catch (error) {
+        setStatus(error.message, true);
+      }
+    });
+
+    window.voucherSettings.onConfigUpdated((config) => {
+      populateForm(config);
+    });
+
+    refreshForm().catch((error) => {
+      setStatus(error.message, true);
+    });
+  </script>
+</body>
+</html>

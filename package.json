@@ -1,0 +1,42 @@
+{
+  "name": "voucher-webview-app",
+  "version": "1.0.0",
+  "author": "Local Build",
+  "description": "Electron desktop app that loads a website, logs in, navigates, and refreshes on a schedule.",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win portable",
+    "dist": "electron-builder --win nsis portable",
+    "package-win": "electron-packager . \"Voucher Webview App\" --platform=win32 --arch=x64 --out=dist-packager --overwrite"
+  },
+  "build": {
+    "appId": "com.voucher.webviewapp",
+    "productName": "Voucher Webview App",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "app-config.json",
+      "package.json"
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false
+    }
+  },
+  "devDependencies": {
+    "electron": "^35.1.4",
+    "electron-builder": "^26.0.12",
+    "electron-packager": "^17.1.2"
+  }
+}

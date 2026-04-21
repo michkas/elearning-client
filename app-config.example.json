@@ -1,0 +1,101 @@
+{
+  "startUrl": "https://kpp.europeanlearning.gr/el/static/home",
+  "targetUrl": "https://kpp.europeanlearning.gr/Education/ViewAsset2.aspx?lang=el-GR&classID=24974&assetID=85335",
+  "credentials": {
+    "username": "",
+    "password": ""
+  },
+  "authState": {
+    "loggedInSelector": "#ctl00_DivUserLoggedIn"
+  },
+  "route": {
+    "classId": "24974",
+    "assetId": "85335"
+  },
+  "window": {
+    "width": 1440,
+    "height": 960
+  },
+  "infoPanel": {
+    "enabled": true,
+    "position": "bottom-right",
+    "showPageUrlWhenIdle": true
+  },
+  "accessSchedule": {
+    "enabled": true,
+    "checkIntervalSeconds": 30,
+    "blockedMessage": "Access to this web application is disabled during the current scheduled time window.",
+    "weekly": {
+      "sunday": [],
+      "monday": [
+        "09:00-18:15"
+      ],
+      "tuesday": [
+        "09:00-18:15"
+      ],
+      "wednesday": [
+        "09:00-18:15"
+      ],
+      "thursday": [
+        "09:00-18:15"
+      ],
+      "friday": [
+        "09:00-18:15"
+      ],
+      "saturday": []
+    }
+  },
+  "sessionRecovery": {
+    "enabled": true,
+    "cooldownMs": 15000,
+    "restartDelayMs": 1200
+  },
+  "flow": [
+    {
+      "action": "clickIfExists",
+      "selector": "#CybotCookiebotDialogBodyButtonDecline",
+      "timeoutMs": 10000,
+      "pollIntervalMs": 500
+    },
+    {
+      "action": "type",
+      "selector": "#ctl00_txtUsername",
+      "value": "{{USERNAME}}",
+      "clearFirst": true
+    },
+    {
+      "action": "type",
+      "selector": "#ctl00_txtPassword",
+      "value": "{{PASSWORD}}",
+      "clearFirst": true
+    },
+    {
+      "action": "click",
+      "selector": "#ctl00_btnLogin",
+      "waitForNavigation": false,
+      "timeoutMs": 30000
+    },
+    {
+      "action": "wait",
+      "ms": 5000
+    },
+    {
+      "action": "goto",
+      "url": "{{TARGET_URL}}",
+      "timeoutMs": 30000
+    },
+    {
+      "action": "waitForUrlContains",
+      "contains": "/Education/ViewAsset2.aspx",
+      "timeoutMs": 30000
+    }
+  ],
+  "refresh": {
+    "enabled": true,
+    "intervalSeconds": 60,
+    "strategy": "goto",
+    "url": "{{TARGET_URL}}",
+    "waitForLoad": true,
+    "timeoutMs": 30000
+  }
+}
