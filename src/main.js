@@ -17,12 +17,16 @@ app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
 const CONFIG_PATH = path.join(__dirname, '..', 'app-config.json');
 const SESSION_PARTITION = 'persist:voucher-app';
 const SETTINGS_WINDOW_FILE = path.join(__dirname, 'settings.html');
+const BLANK_SCREEN_IDLE_THRESHOLD_MS = 2 * 60 * 1000;
+const BLANK_SCREEN_CHECK_INTERVAL_MS = 15 * 1000;
+const LOG_FILE_NAME = 'voucher-webview-app.log';
 
 let currentConfig;
 let mainWindow;
 let settingsWindow;
 let refreshTimer;
 let scheduleTimer;
+let blankScreenTimer;
 let powerBlockerId;
 let refreshInFlight = false;
 let automationInFlight = false;
@@ -30,13 +34,37 @@ let steadyStateMonitoring = false;
 let recoveryInFlight = false;
 let lastRecoveryAt = 0;
 let accessBlocked = false;
+let blankScreenRecoveryInFlight = false;
+let lastWindowActivityAt = Date.now();
+let logFilePath;
+
+function getLogFilePath() {
+  if (!logFilePath) {
+    const userDataPath = app.getPath('userData');
+    fs.mkdirSync(userDataPath, { recursive: true });
+    logFilePath = path.join(userDataPath, LOG_FILE_NAME);
+  }
+
+  return logFilePath;
+}
 
 function log(message) {
-  console.log(`[${new Date().toISOString()}] ${message}`);
+  const line = `[${new Date().toISOString()}] ${message}`;
+  console.log(line);
+
+  try {
+    fs.appendFileSync(getLogFilePath(), `${line}\n`, 'utf8');
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Failed to write log file: ${error.message}`);
+  }
 }
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function markWindowActivity() {
+  lastWindowActivityAt = Date.now();
 }
 
 function getDefaultConfig() {
@@ -614,6 +642,102 @@ function monitorSessionState(rawUrl) {
   });
 }
 
+async function isBlankScreen(win) {
+  if (!win || win.isDestroyed()) {
+    return false;
+  }
+
+  const currentUrl = win.webContents.getURL();
+  if (!currentUrl || currentUrl === 'about:blank') {
+    return true;
+  }
+
+  try {
+    return await executeInPage(
+      win,
+      () => {
+        const body = document.body;
+        const root = document.documentElement;
+        const bodyText = body?.innerText?.trim() ?? '';
+        const bodyHtmlLength = (body?.innerHTML ?? '').replace(/\s+/g, '').length;
+        const childCount = body?.children?.length ?? 0;
+        const meaningfulElementCount = document.querySelectorAll('iframe, img, canvas, svg, video, embed, object, input, button, a, [role]').length;
+        const bodyRect = body?.getBoundingClientRect?.() ?? { width: 0, height: 0 };
+        const rootRect = root?.getBoundingClientRect?.() ?? { width: 0, height: 0 };
+
+        return document.readyState === 'complete'
+          && bodyText.length === 0
+          && meaningfulElementCount === 0
+          && childCount === 0
+          && bodyHtmlLength < 32
+          && Math.max(bodyRect.height || 0, rootRect.height || 0) <= 4;
+      }
+    );
+  } catch (_error) {
+    return false;
+  }
+}
+
+async function recoverFromBlankScreen() {
+  if (blankScreenRecoveryInFlight || recoveryInFlight || automationInFlight || refreshInFlight) {
+    return;
+  }
+
+  blankScreenRecoveryInFlight = true;
+  markWindowActivity();
+  stopRefreshLoop();
+
+  try {
+    try {
+      await navigateToSavedTarget();
+    } catch (error) {
+      log(`Blank-screen target recovery failed, falling back to full automation restart. ${error.message}`);
+      await restartAutomation();
+    }
+  } catch (error) {
+    log(`Blank-screen recovery failed: ${error.message}`);
+  } finally {
+    blankScreenRecoveryInFlight = false;
+  }
+}
+
+function stopBlankScreenMonitor() {
+  if (blankScreenTimer) {
+    clearInterval(blankScreenTimer);
+    blankScreenTimer = undefined;
+  }
+}
+
+function startBlankScreenMonitor() {
+  stopBlankScreenMonitor();
+
+  blankScreenTimer = setInterval(() => {
+    if (!mainWindow || mainWindow.isDestroyed() || accessBlocked) {
+      return;
+    }
+
+    if (Date.now() - lastWindowActivityAt < BLANK_SCREEN_IDLE_THRESHOLD_MS) {
+      return;
+    }
+
+    isBlankScreen(mainWindow)
+      .then((blank) => {
+        if (!blank) {
+          return;
+        }
+
+        const currentUrl = mainWindow.webContents.getURL() || 'unknown URL';
+        log(`Blank screen detected after 120 seconds without interaction at ${currentUrl}. Restarting navigation.`);
+        recoverFromBlankScreen().catch((error) => {
+          log(`Blank-screen recovery failed: ${error.message}`);
+        });
+      })
+      .catch((error) => {
+        log(`Blank-screen monitor failed: ${error.message}`);
+      });
+  }, BLANK_SCREEN_CHECK_INTERVAL_MS);
+}
+
 async function executeInPage(win, pageFunction, ...args) {
   const source = `(${pageFunction})(${args.map((arg) => JSON.stringify(arg)).join(', ')})`;
   return win.webContents.executeJavaScript(source, true);
@@ -897,10 +1021,12 @@ function createWindow() {
   }
 
   win.webContents.on('did-start-loading', () => {
+    markWindowActivity();
     log(`Loading ${win.webContents.getURL() || 'pending URL'} ...`);
   });
 
   win.webContents.on('did-finish-load', async () => {
+    markWindowActivity();
     const currentUrl = win.webContents.getURL();
     log(`Loaded ${currentUrl}`);
     await syncInfoPanel(win);
@@ -908,7 +1034,12 @@ function createWindow() {
   });
 
   win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    markWindowActivity();
     log(`Load failed (${errorCode}) ${errorDescription} for ${validatedURL}`);
+  });
+
+  win.webContents.on('before-input-event', () => {
+    markWindowActivity();
   });
 
   return win;
@@ -1567,6 +1698,8 @@ async function bootstrap() {
   registerIpcHandlers();
   mainWindow = createWindow();
   startScheduleMonitor();
+  startBlankScreenMonitor();
+  markWindowActivity();
 
   if (!powerSaveBlocker.isStarted(powerBlockerId ?? -1)) {
     powerBlockerId = powerSaveBlocker.start('prevent-app-suspension');
@@ -1598,6 +1731,7 @@ app.on('activate', () => {
 app.on('window-all-closed', () => {
   stopRefreshLoop();
   stopScheduleMonitor();
+  stopBlankScreenMonitor();
 
   if (powerSaveBlocker.isStarted(powerBlockerId ?? -1)) {
     powerSaveBlocker.stop(powerBlockerId);
