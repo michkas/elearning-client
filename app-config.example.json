@@ -47,8 +47,10 @@
   },
   "sessionRecovery": {
     "enabled": true,
-    "cooldownMs": 15000,
-    "restartDelayMs": 1200
+    "cooldownMs": 8000,
+    "restartDelayMs": 1200,
+    "targetRetryLimit": 1,
+    "dashboardRedirectRestart": true
   },
   "flow": [
     {

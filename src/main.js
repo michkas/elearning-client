@@ -36,6 +36,7 @@ let lastRecoveryAt = 0;
 let accessBlocked = false;
 let blankScreenRecoveryInFlight = false;
 let lastWindowActivityAt = Date.now();
+let recentUnexpectedNavigation = null;
 let logFilePath;
 
 function getLogFilePath() {
@@ -107,8 +108,10 @@ function getDefaultConfig() {
     },
     sessionRecovery: {
       enabled: true,
-      cooldownMs: 15000,
-      restartDelayMs: 1200
+      cooldownMs: 8000,
+      restartDelayMs: 1200,
+      targetRetryLimit: 1,
+      dashboardRedirectRestart: true
     },
     flow: [],
     refresh: {
@@ -187,6 +190,8 @@ function normalizeConfig(inputConfig) {
   mergedConfig.accessSchedule.blockedMessage = String(mergedConfig.accessSchedule.blockedMessage ?? defaults.accessSchedule.blockedMessage).trim() || defaults.accessSchedule.blockedMessage;
   mergedConfig.sessionRecovery.cooldownMs = Math.max(1000, Number(mergedConfig.sessionRecovery.cooldownMs) || defaults.sessionRecovery.cooldownMs);
   mergedConfig.sessionRecovery.restartDelayMs = Math.max(0, Number(mergedConfig.sessionRecovery.restartDelayMs) || defaults.sessionRecovery.restartDelayMs);
+  mergedConfig.sessionRecovery.targetRetryLimit = Math.max(0, Number(mergedConfig.sessionRecovery.targetRetryLimit) || defaults.sessionRecovery.targetRetryLimit);
+  mergedConfig.sessionRecovery.dashboardRedirectRestart = mergedConfig.sessionRecovery.dashboardRedirectRestart !== false;
   mergedConfig.refresh.intervalSeconds = Math.max(1, Number(mergedConfig.refresh.intervalSeconds) || defaults.refresh.intervalSeconds);
   mergedConfig.refresh.timeoutMs = Math.max(1000, Number(mergedConfig.refresh.timeoutMs) || defaults.refresh.timeoutMs);
   mergedConfig.refresh.strategy = mergedConfig.refresh.strategy === 'reload' ? 'reload' : 'goto';
@@ -573,15 +578,51 @@ function isExpectedSteadyStateUrl(rawUrl) {
   return currentUrl.origin === targetUrl.origin && currentUrl.pathname.toLowerCase() === targetUrl.pathname.toLowerCase();
 }
 
+function describeNavigationContext(rawUrl) {
+  const currentUrl = parseUrl(rawUrl);
+  const targetUrl = parseUrl(getResolvedTargetUrl());
+  const startUrl = parseUrl(resolveTemplate(currentConfig.startUrl, currentConfig));
+  const currentPath = currentUrl?.pathname?.toLowerCase() ?? '';
+  const targetPath = targetUrl?.pathname?.toLowerCase() ?? '';
+  const startPath = startUrl?.pathname?.toLowerCase() ?? '';
+  const dashboardPath = '/dashboard/dashboard.aspx';
+
+  return {
+    currentPath,
+    redirectedToStart: Boolean(currentPath && startPath && currentPath === startPath),
+    redirectedToDashboard: Boolean(currentPath && currentPath === dashboardPath),
+    sameOriginAsTarget: Boolean(currentUrl && targetUrl && currentUrl.origin === targetUrl.origin),
+    targetPath,
+    startPath
+  };
+}
+
 async function scheduleSessionRecovery(reason, rawUrl, options = {}) {
   if (recoveryInFlight || automationInFlight || !currentConfig.sessionRecovery?.enabled) {
     return;
   }
 
+  const targetRetryLimit = currentConfig.sessionRecovery.targetRetryLimit ?? 1;
+  const recoveryMode = options.mode === 'target' ? 'target' : 'restart';
+  const sameUnexpectedUrl = recentUnexpectedNavigation?.url === rawUrl;
+  const repeatCount = sameUnexpectedUrl ? recentUnexpectedNavigation.count + 1 : 1;
+  const forcedRestart = recoveryMode === 'target' && repeatCount > targetRetryLimit;
+  const nextRecoveryMode = forcedRestart ? 'restart' : recoveryMode;
+  const nextRecoveryReason = forcedRestart
+    ? `${reason}; saved-target retry limit ${targetRetryLimit} reached`
+    : reason;
+
+  recentUnexpectedNavigation = {
+    url: rawUrl,
+    count: repeatCount,
+    firstDetectedAt: sameUnexpectedUrl ? recentUnexpectedNavigation.firstDetectedAt : Date.now(),
+    lastDetectedAt: Date.now()
+  };
+
   const cooldownMs = currentConfig.sessionRecovery.cooldownMs;
   const elapsedSinceRecovery = Date.now() - lastRecoveryAt;
   if (elapsedSinceRecovery < cooldownMs) {
-    log(`Session recovery skipped due to cooldown after ${reason}.`);
+    log(`Session recovery skipped due to cooldown after ${nextRecoveryReason}. Remaining cooldown: ${cooldownMs - elapsedSinceRecovery}ms. Repeat count for ${rawUrl}: ${repeatCount}.`);
     return;
   }
 
@@ -589,11 +630,10 @@ async function scheduleSessionRecovery(reason, rawUrl, options = {}) {
   stopRefreshLoop();
 
   const delayMs = currentConfig.sessionRecovery.restartDelayMs;
-  const recoveryMode = options.mode === 'target' ? 'target' : 'restart';
-  const recoveryActionText = recoveryMode === 'target'
+  const recoveryActionText = nextRecoveryMode === 'target'
     ? 'Retrying the saved target'
     : 'Restarting automation';
-  log(`Session reset detected: ${reason}. Current URL: ${rawUrl}. ${recoveryActionText} in ${delayMs}ms.`);
+  log(`Session reset detected: ${nextRecoveryReason}. Current URL: ${rawUrl}. ${recoveryActionText} in ${delayMs}ms. Repeat count for this URL: ${repeatCount}.`);
 
   if (delayMs > 0) {
     await delay(delayMs);
@@ -602,7 +642,7 @@ async function scheduleSessionRecovery(reason, rawUrl, options = {}) {
   lastRecoveryAt = Date.now();
 
   try {
-    if (recoveryMode === 'target') {
+    if (nextRecoveryMode === 'target') {
       try {
         await navigateToSavedTarget();
       } catch (error) {
@@ -612,6 +652,7 @@ async function scheduleSessionRecovery(reason, rawUrl, options = {}) {
     } else {
       await restartAutomation();
     }
+    recentUnexpectedNavigation = null;
   } catch (error) {
     log(`Session recovery failed: ${error.message}`);
   } finally {
@@ -630,15 +671,33 @@ function monitorSessionState(rawUrl) {
 
   const currentUrl = parseUrl(rawUrl);
   const startUrl = parseUrl(resolveTemplate(currentConfig.startUrl, currentConfig));
-  const currentPath = currentUrl?.pathname?.toLowerCase() ?? '';
-  const startPath = startUrl?.pathname?.toLowerCase() ?? '';
-  const redirectedToStart = currentPath && startPath && currentPath === startPath;
-  const reason = redirectedToStart
+  const navigationContext = describeNavigationContext(rawUrl);
+  const reason = navigationContext.redirectedToStart
     ? 'redirected to the start/login page'
-    : `unexpected navigation to ${rawUrl}`;
+    : navigationContext.redirectedToDashboard
+      ? `redirected to the dashboard instead of ${navigationContext.targetPath || 'the saved target path'}`
+      : `unexpected navigation to ${rawUrl}`;
+
+  const detailParts = [
+    `path=${navigationContext.currentPath || 'unknown'}`,
+    `sameOriginAsTarget=${navigationContext.sameOriginAsTarget}`
+  ];
+
+  if (navigationContext.targetPath) {
+    detailParts.push(`targetPath=${navigationContext.targetPath}`);
+  }
+
+  if (navigationContext.startPath) {
+    detailParts.push(`startPath=${navigationContext.startPath}`);
+  }
+
+  log(`Unexpected steady-state navigation observed: ${detailParts.join(', ')}.`);
 
   scheduleSessionRecovery(reason, rawUrl, {
-    mode: redirectedToStart ? 'restart' : 'target'
+    mode: navigationContext.redirectedToStart
+      || (navigationContext.redirectedToDashboard && currentConfig.sessionRecovery.dashboardRedirectRestart !== false)
+      ? 'restart'
+      : 'target'
   });
 }
 
