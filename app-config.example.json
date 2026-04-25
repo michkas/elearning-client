@@ -24,6 +24,7 @@
   "accessSchedule": {
     "enabled": true,
     "checkIntervalSeconds": 30,
+    "restartNavigationWhenAllowed": true,
     "blockedMessage": "Access to this web application is disabled during the current scheduled time window.",
     "weekly": {
       "sunday": [],

@@ -280,6 +280,10 @@
             <input id="accessScheduleEnabled" name="accessScheduleEnabled" type="checkbox">
             <label for="accessScheduleEnabled">Force logout and block access during scheduled windows</label>
           </div>
+          <div class="field toggle">
+            <input id="restartNavigationWhenAllowed" name="restartNavigationWhenAllowed" type="checkbox">
+            <label for="restartNavigationWhenAllowed">Automatically restart navigation when the blocked window ends</label>
+          </div>
           <div class="field">
             <label for="accessScheduleCheckIntervalSeconds">Schedule check interval (seconds)</label>
             <input id="accessScheduleCheckIntervalSeconds" name="accessScheduleCheckIntervalSeconds" type="number" min="5" step="5">
@@ -393,6 +397,7 @@
       form.sessionRecoveryCooldownMs.value = config.sessionRecovery?.cooldownMs || 15000;
       form.sessionRecoveryDelayMs.value = config.sessionRecovery?.restartDelayMs || 1200;
       form.accessScheduleEnabled.checked = config.accessSchedule?.enabled === true;
+      form.restartNavigationWhenAllowed.checked = config.accessSchedule?.restartNavigationWhenAllowed !== false;
       form.accessScheduleCheckIntervalSeconds.value = config.accessSchedule?.checkIntervalSeconds || 30;
       form.blockedMessage.value = config.accessSchedule?.blockedMessage || '';
       form.scheduleMonday.value = (weekly.monday || []).join(', ');
@@ -443,6 +448,7 @@
         },
         accessSchedule: {
           enabled: form.accessScheduleEnabled.checked,
+          restartNavigationWhenAllowed: form.restartNavigationWhenAllowed.checked,
           checkIntervalSeconds: Number(form.accessScheduleCheckIntervalSeconds.value || 30),
           blockedMessage: form.blockedMessage.value.trim(),
           weekly: {

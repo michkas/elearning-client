@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const {
   app,
+  BrowserView,
   BrowserWindow,
   Menu,
   dialog,
@@ -20,9 +21,12 @@ const SETTINGS_WINDOW_FILE = path.join(__dirname, 'settings.html');
 const BLANK_SCREEN_IDLE_THRESHOLD_MS = 2 * 60 * 1000;
 const BLANK_SCREEN_CHECK_INTERVAL_MS = 15 * 1000;
 const LOG_FILE_NAME = 'voucher-webview-app.log';
+const SESSION_STARTED_AT = new Date();
+const STATUS_BAR_HEIGHT = 44;
 
 let currentConfig;
 let mainWindow;
+let mainContentView;
 let settingsWindow;
 let refreshTimer;
 let scheduleTimer;
@@ -38,12 +42,108 @@ let blankScreenRecoveryInFlight = false;
 let lastWindowActivityAt = Date.now();
 let recentUnexpectedNavigation = null;
 let logFilePath;
+let statusBarPanelVisible = true;
+
+function getManagedWebContents(target) {
+  return target?.webContents;
+}
+
+function getMainContentTarget() {
+  return mainContentView ?? mainWindow;
+}
+
+function getMainContentWebContents() {
+  return getManagedWebContents(getMainContentTarget());
+}
+
+async function loadManagedUrl(target, url) {
+  const webContents = getManagedWebContents(target);
+  if (!webContents) {
+    throw new Error('Managed content is not available.');
+  }
+
+  await webContents.loadURL(url);
+}
+
+function getManagedUrl(target) {
+  return getManagedWebContents(target)?.getURL() || '';
+}
+
+function isManagedTargetDestroyed(target) {
+  if (!target) {
+    return true;
+  }
+
+  if (typeof target.isDestroyed === 'function') {
+    return target.isDestroyed();
+  }
+
+  const webContents = getManagedWebContents(target);
+  return !webContents || webContents.isDestroyed();
+}
+
+function layoutMainWindow(win) {
+  if (!win || win.isDestroyed() || !mainContentView) {
+    return;
+  }
+
+  const [width, height] = win.getContentSize();
+  mainContentView.setBounds({
+    x: 0,
+    y: 0,
+    width,
+    height: Math.max(0, height - STATUS_BAR_HEIGHT)
+  });
+  mainContentView.setAutoResize({ width: true, height: true });
+}
+
+function getStatusBarState() {
+  return {
+    username: currentConfig?.credentials?.username || '',
+    panelVisible: currentConfig?.infoPanel?.enabled !== false && statusBarPanelVisible
+  };
+}
+
+function syncStatusBar() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  mainWindow.webContents.send('status-bar:state', getStatusBarState());
+}
+
+function sanitizeFileNamePart(value, fallback) {
+  const normalizedValue = String(value ?? '').trim();
+  const sanitizedValue = normalizedValue.replace(/[<>:"/\\|?*\x00-\x1f]+/g, '-').replace(/\s+/g, '-');
+  return sanitizedValue || fallback;
+}
+
+function formatLogSessionTimestamp(value) {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  const hours = String(value.getHours()).padStart(2, '0');
+  const minutes = String(value.getMinutes()).padStart(2, '0');
+  const seconds = String(value.getSeconds()).padStart(2, '0');
+
+  return `${year}${month}${day}-${hours}${minutes}${seconds}`;
+}
+
+function getLogFileName() {
+  const configuredUsername = currentConfig?.credentials?.username;
+  const fallbackUsername = process.env.USERNAME || process.env.USER || 'unknown-user';
+  const usernamePrefix = sanitizeFileNamePart(configuredUsername || fallbackUsername, 'unknown-user');
+  const timestampSuffix = formatLogSessionTimestamp(SESSION_STARTED_AT);
+  const parsedLogFileName = path.parse(LOG_FILE_NAME);
+
+  return `${usernamePrefix}_${parsedLogFileName.name}_${timestampSuffix}${parsedLogFileName.ext}`;
+}
 
 function getLogFilePath() {
   if (!logFilePath) {
     const userDataPath = app.getPath('userData');
     fs.mkdirSync(userDataPath, { recursive: true });
-    logFilePath = path.join(userDataPath, LOG_FILE_NAME);
+    logFilePath = path.join(userDataPath, getLogFileName());
   }
 
   return logFilePath;
@@ -95,6 +195,7 @@ function getDefaultConfig() {
     accessSchedule: {
       enabled: false,
       checkIntervalSeconds: 30,
+      restartNavigationWhenAllowed: true,
       blockedMessage: 'Access to this web application is disabled during the current scheduled time window.',
       weekly: {
         sunday: [],
@@ -186,13 +287,20 @@ function normalizeConfig(inputConfig) {
   mergedConfig.route.assetId = String(mergedConfig.route.assetId ?? '').trim();
   mergedConfig.window.width = Math.max(800, Number(mergedConfig.window.width) || defaults.window.width);
   mergedConfig.window.height = Math.max(600, Number(mergedConfig.window.height) || defaults.window.height);
+  mergedConfig.infoPanel.enabled = mergedConfig.infoPanel.enabled !== false;
+  mergedConfig.infoPanel.showPageUrlWhenIdle = mergedConfig.infoPanel.showPageUrlWhenIdle !== false;
+  mergedConfig.accessSchedule.enabled = mergedConfig.accessSchedule.enabled === true;
   mergedConfig.accessSchedule.checkIntervalSeconds = Math.max(5, Number(mergedConfig.accessSchedule.checkIntervalSeconds) || defaults.accessSchedule.checkIntervalSeconds);
+  mergedConfig.accessSchedule.restartNavigationWhenAllowed = mergedConfig.accessSchedule.restartNavigationWhenAllowed !== false;
   mergedConfig.accessSchedule.blockedMessage = String(mergedConfig.accessSchedule.blockedMessage ?? defaults.accessSchedule.blockedMessage).trim() || defaults.accessSchedule.blockedMessage;
+  mergedConfig.sessionRecovery.enabled = mergedConfig.sessionRecovery.enabled !== false;
   mergedConfig.sessionRecovery.cooldownMs = Math.max(1000, Number(mergedConfig.sessionRecovery.cooldownMs) || defaults.sessionRecovery.cooldownMs);
   mergedConfig.sessionRecovery.restartDelayMs = Math.max(0, Number(mergedConfig.sessionRecovery.restartDelayMs) || defaults.sessionRecovery.restartDelayMs);
   mergedConfig.sessionRecovery.targetRetryLimit = Math.max(0, Number(mergedConfig.sessionRecovery.targetRetryLimit) || defaults.sessionRecovery.targetRetryLimit);
   mergedConfig.sessionRecovery.dashboardRedirectRestart = mergedConfig.sessionRecovery.dashboardRedirectRestart !== false;
+  mergedConfig.refresh.enabled = mergedConfig.refresh.enabled !== false;
   mergedConfig.refresh.intervalSeconds = Math.max(1, Number(mergedConfig.refresh.intervalSeconds) || defaults.refresh.intervalSeconds);
+  mergedConfig.refresh.waitForLoad = mergedConfig.refresh.waitForLoad !== false;
   mergedConfig.refresh.timeoutMs = Math.max(1000, Number(mergedConfig.refresh.timeoutMs) || defaults.refresh.timeoutMs);
   mergedConfig.refresh.strategy = mergedConfig.refresh.strategy === 'reload' ? 'reload' : 'goto';
   mergedConfig.refresh.url = String(mergedConfig.refresh.url ?? defaults.refresh.url).trim() || defaults.refresh.url;
@@ -353,6 +461,18 @@ function parseUrl(rawUrl) {
   }
 }
 
+function toAbsoluteUrl(rawUrl, baseUrl) {
+  if (!rawUrl) {
+    return '';
+  }
+
+  try {
+    return new URL(rawUrl, baseUrl).toString();
+  } catch (_error) {
+    return rawUrl;
+  }
+}
+
 function getDashboardFallbackUrl(config) {
   const targetUrl = parseUrl(resolveTemplate(config.targetUrl, config));
   const startUrl = parseUrl(resolveTemplate(config.startUrl, config));
@@ -483,12 +603,180 @@ function buildBlockedPageHtml(scheduleInterval) {
 </html>`;
 }
 
+function buildShellHtml() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voucher Shell</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: "Segoe UI", Tahoma, sans-serif;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: flex-end;
+      justify-content: stretch;
+      overflow: hidden;
+      background: #0f172a;
+    }
+
+    .voucher-status-bar {
+      height: ${STATUS_BAR_HEIGHT}px;
+      min-height: ${STATUS_BAR_HEIGHT}px;
+      max-height: ${STATUS_BAR_HEIGHT}px;
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 0 14px;
+      box-sizing: border-box;
+      background: rgba(15, 23, 42, 0.94);
+      color: #e2e8f0;
+      border-top: 1px solid rgba(148, 163, 184, 0.18);
+      box-shadow: 0 -10px 30px rgba(15, 23, 42, 0.18);
+      overflow: hidden;
+    }
+
+    .voucher-status-user {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+      line-height: 1;
+    }
+
+    .voucher-status-label {
+      opacity: 0.68;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-right: 6px;
+      font-size: 10px;
+    }
+
+    .voucher-status-button {
+      position: relative;
+      border: 1px solid rgba(226, 232, 240, 0.28);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.12);
+      color: inherit;
+      width: 30px;
+      height: 30px;
+      min-width: 30px;
+      min-height: 30px;
+      padding: 0;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font: inherit;
+      line-height: 1;
+      flex-shrink: 0;
+    }
+
+    .voucher-status-button:hover {
+      background: rgba(255, 255, 255, 0.18);
+    }
+
+    .voucher-status-button svg {
+      width: 16px;
+      height: 16px;
+      display: block;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 1.8;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .voucher-status-button::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      right: 0;
+      bottom: calc(100% + 8px);
+      padding: 6px 8px;
+      border-radius: 8px;
+      background: rgba(15, 23, 42, 0.96);
+      color: #f8fafc;
+      font-size: 11px;
+      line-height: 1;
+      letter-spacing: 0.01em;
+      white-space: nowrap;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.25);
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(4px);
+      transition: opacity 120ms ease, transform 120ms ease;
+    }
+
+    .voucher-status-button:hover::after,
+    .voucher-status-button:focus-visible::after {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  </style>
+</head>
+<body>
+  <div class="voucher-status-bar">
+    <div class="voucher-status-user" id="voucher-status-user"><span class="voucher-status-label">User</span>Unavailable</div>
+    <button class="voucher-status-button" id="voucher-status-toggle" type="button" aria-label="Hide target URL panel" data-tooltip="Hide target URL panel"></button>
+  </div>
+  <script>
+    const userElement = document.getElementById('voucher-status-user');
+    const toggleButton = document.getElementById('voucher-status-toggle');
+
+    function getToggleIconMarkup(panelVisible) {
+      return panelVisible
+        ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"></path><circle cx="12" cy="12" r="3"></circle></svg>'
+        : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18"></path><path d="M10.6 5.1A10.8 10.8 0 0 1 12 5c6.5 0 10 7 10 7a18.7 18.7 0 0 1-4 4.9"></path><path d="M6.7 6.7A18.2 18.2 0 0 0 2 12s3.5 7 10 7a10.7 10.7 0 0 0 5.1-1.2"></path><path d="M9.9 9.9A3 3 0 0 0 14.1 14.1"></path></svg>';
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
+    function renderState(state) {
+      const username = state?.username || 'Unavailable';
+      const panelVisible = state?.panelVisible !== false;
+      const caption = panelVisible ? 'Hide target URL panel' : 'Show target URL panel';
+      userElement.innerHTML = '<span class="voucher-status-label">User</span>' + escapeHtml(username);
+      toggleButton.innerHTML = getToggleIconMarkup(panelVisible);
+      toggleButton.setAttribute('aria-label', caption);
+      toggleButton.setAttribute('title', caption);
+      toggleButton.setAttribute('data-tooltip', caption);
+    }
+
+    toggleButton.addEventListener('click', () => {
+      window.voucherApp?.statusBar?.toggleTargetPanel();
+    });
+
+    window.voucherApp?.statusBar?.onStateChanged(renderState);
+    window.voucherApp?.statusBar?.requestState();
+  </script>
+</body>
+</html>`;
+}
+
 async function clearAuthenticatedSession() {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return;
   }
 
-  const webSession = mainWindow.webContents.session;
+  const webSession = getMainContentWebContents()?.session;
+  if (!webSession) {
+    return;
+  }
+
   await Promise.allSettled([
     webSession.clearCache(),
     webSession.clearStorageData({
@@ -510,8 +798,9 @@ async function enterBlockedSchedule(scheduleInterval) {
   log(`Schedule block active for ${scheduleInterval.dayName} ${scheduleInterval.range}. Logging out and blocking access until ${scheduleInterval.end.toISOString()}.`);
   await clearAuthenticatedSession();
 
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    await mainWindow.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(buildBlockedPageHtml(scheduleInterval))}`);
+  const contentTarget = getMainContentTarget();
+  if (contentTarget && !isManagedTargetDestroyed(contentTarget)) {
+    await loadManagedUrl(contentTarget, `data:text/html;charset=UTF-8,${encodeURIComponent(buildBlockedPageHtml(scheduleInterval))}`);
   }
 }
 
@@ -521,8 +810,13 @@ async function exitBlockedSchedule() {
   }
 
   accessBlocked = false;
-  log('Schedule block ended. Restarting automation.');
-  await restartAutomation();
+  if (currentConfig.accessSchedule?.restartNavigationWhenAllowed !== false) {
+    log('Schedule block ended. Restarting automation.');
+    await restartAutomation();
+    return;
+  }
+
+  log('Schedule block ended. Automatic navigation restart is disabled; waiting for manual restart.');
 }
 
 async function enforceAccessSchedule() {
@@ -567,9 +861,24 @@ function getResolvedTargetUrl() {
   return resolveTemplate(currentConfig.targetUrl || currentConfig.refresh.url || '', currentConfig);
 }
 
+function getResolvedTargetUrlForConfig(config) {
+  return resolveTemplate(config.targetUrl || config.refresh?.url || '', config);
+}
+
 function isExpectedSteadyStateUrl(rawUrl) {
   const currentUrl = parseUrl(rawUrl);
   const targetUrl = parseUrl(getResolvedTargetUrl());
+
+  if (!currentUrl || !targetUrl) {
+    return false;
+  }
+
+  return currentUrl.origin === targetUrl.origin && currentUrl.pathname.toLowerCase() === targetUrl.pathname.toLowerCase();
+}
+
+function matchesExpectedSteadyStateUrl(rawUrl, config) {
+  const currentUrl = parseUrl(rawUrl);
+  const targetUrl = parseUrl(getResolvedTargetUrlForConfig(config));
 
   if (!currentUrl || !targetUrl) {
     return false;
@@ -661,7 +970,7 @@ async function scheduleSessionRecovery(reason, rawUrl, options = {}) {
 }
 
 function monitorSessionState(rawUrl) {
-  if (!steadyStateMonitoring || automationInFlight || !currentConfig.sessionRecovery?.enabled) {
+  if (!steadyStateMonitoring || automationInFlight || !currentConfig.sessionRecovery?.enabled || currentConfig.refresh?.enabled === false) {
     return;
   }
 
@@ -702,11 +1011,11 @@ function monitorSessionState(rawUrl) {
 }
 
 async function isBlankScreen(win) {
-  if (!win || win.isDestroyed()) {
+  if (!win || isManagedTargetDestroyed(win)) {
     return false;
   }
 
-  const currentUrl = win.webContents.getURL();
+  const currentUrl = getManagedUrl(win);
   if (!currentUrl || currentUrl === 'about:blank') {
     return true;
   }
@@ -779,13 +1088,13 @@ function startBlankScreenMonitor() {
       return;
     }
 
-    isBlankScreen(mainWindow)
+    isBlankScreen(getMainContentTarget())
       .then((blank) => {
         if (!blank) {
           return;
         }
 
-        const currentUrl = mainWindow.webContents.getURL() || 'unknown URL';
+        const currentUrl = getManagedUrl(getMainContentTarget()) || 'unknown URL';
         log(`Blank screen detected after 120 seconds without interaction at ${currentUrl}. Restarting navigation.`);
         recoverFromBlankScreen().catch((error) => {
           log(`Blank-screen recovery failed: ${error.message}`);
@@ -799,16 +1108,16 @@ function startBlankScreenMonitor() {
 
 async function executeInPage(win, pageFunction, ...args) {
   const source = `(${pageFunction})(${args.map((arg) => JSON.stringify(arg)).join(', ')})`;
-  return win.webContents.executeJavaScript(source, true);
+  return getManagedWebContents(win).executeJavaScript(source, true);
 }
 
 async function syncInfoPanel(win) {
-  if (!win || win.isDestroyed()) {
+  if (!win || isManagedTargetDestroyed(win)) {
     return;
   }
 
   const panelOptions = {
-    enabled: currentConfig.infoPanel?.enabled !== false,
+    enabled: currentConfig.infoPanel?.enabled !== false && statusBarPanelVisible,
     showPageUrlWhenIdle: currentConfig.infoPanel?.showPageUrlWhenIdle !== false,
     position: currentConfig.infoPanel?.position ?? 'bottom-right'
   };
@@ -832,7 +1141,7 @@ async function syncInfoPanel(win) {
           minWidth: '20rem',
           padding: '10px 12px',
           borderRadius: '10px',
-          background: 'rgba(15, 23, 42, 0.9)',
+          background: 'rgba(15, 23, 42, 0.62)',
           color: '#f8fafc',
           fontFamily: 'Consolas, "Courier New", monospace',
           fontSize: '12px',
@@ -969,7 +1278,12 @@ async function syncInfoPanel(win) {
           const label = info?.label || 'current page';
           const tagName = info?.tagName || 'page';
 
-          if (!state.enabled || !displayUrl) {
+          if (!state.enabled) {
+            panel.style.display = 'none';
+            return;
+          }
+
+          if (!displayUrl) {
             panel.style.display = 'none';
             return;
           }
@@ -1065,6 +1379,18 @@ function createWindow() {
     height: currentConfig.window.height,
     show: true,
     autoHideMenuBar: false,
+    backgroundColor: '#0f172a',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  });
+
+  void win.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(buildShellHtml())}`);
+
+  mainContentView = new BrowserView({
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -1075,29 +1401,38 @@ function createWindow() {
     }
   });
 
-  if (typeof win.webContents.setBackgroundThrottling === 'function') {
-    win.webContents.setBackgroundThrottling(false);
+  win.setBrowserView(mainContentView);
+  layoutMainWindow(win);
+  win.on('resize', () => layoutMainWindow(win));
+
+  if (typeof mainContentView.webContents.setBackgroundThrottling === 'function') {
+    mainContentView.webContents.setBackgroundThrottling(false);
   }
 
-  win.webContents.on('did-start-loading', () => {
-    markWindowActivity();
-    log(`Loading ${win.webContents.getURL() || 'pending URL'} ...`);
+  win.webContents.on('did-finish-load', () => {
+    syncStatusBar();
   });
 
-  win.webContents.on('did-finish-load', async () => {
+  mainContentView.webContents.on('did-start-loading', () => {
     markWindowActivity();
-    const currentUrl = win.webContents.getURL();
+    log(`Loading ${mainContentView.webContents.getURL() || 'pending URL'} ...`);
+  });
+
+  mainContentView.webContents.on('did-finish-load', async () => {
+    markWindowActivity();
+    const currentUrl = mainContentView.webContents.getURL();
     log(`Loaded ${currentUrl}`);
-    await syncInfoPanel(win);
+    await syncInfoPanel(mainContentView);
+    syncStatusBar();
     monitorSessionState(currentUrl);
   });
 
-  win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+  mainContentView.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
     markWindowActivity();
     log(`Load failed (${errorCode}) ${errorDescription} for ${validatedURL}`);
   });
 
-  win.webContents.on('before-input-event', () => {
+  mainContentView.webContents.on('before-input-event', () => {
     markWindowActivity();
   });
 
@@ -1155,13 +1490,14 @@ function isTransientNavigationError(error) {
 }
 
 async function navigateTo(win, url, timeoutMs, attempt = 0) {
+  const webContents = getManagedWebContents(win);
   let navigationError;
-  const navigation = waitForNextLoad(win.webContents, timeoutMs).catch((error) => {
+  const navigation = waitForNextLoad(webContents, timeoutMs).catch((error) => {
     navigationError = error;
     return undefined;
   });
 
-  await win.loadURL(url);
+  await loadManagedUrl(win, url);
   await navigation;
 
   if (!navigationError) {
@@ -1224,7 +1560,19 @@ async function getElementAttribute(win, selector, attributeName) {
         return '';
       }
 
-      return element.getAttribute(attributeValue) || element[attributeValue] || '';
+      const propertyValue = element[attributeValue];
+      if (typeof propertyValue === 'string' && propertyValue.trim()) {
+        return propertyValue;
+      }
+
+      const attributeRawValue = element.getAttribute(attributeValue) || '';
+      if (!attributeRawValue) {
+        return '';
+      }
+
+      return ['href', 'src', 'action', 'formAction'].includes(attributeValue)
+        ? new URL(attributeRawValue, document.location.href).toString()
+        : attributeRawValue;
     },
     selector,
     attributeName
@@ -1371,7 +1719,7 @@ async function runStep(win, step, config) {
       await waitForSelector(win, selector, timeoutMs);
       if (step.waitForNavigation) {
         await Promise.all([
-          waitForNextLoad(win.webContents, timeoutMs),
+          waitForNextLoad(getManagedWebContents(win), timeoutMs),
           clickElement(win, selector)
         ]);
         return;
@@ -1406,6 +1754,41 @@ async function runStep(win, step, config) {
   }
 }
 
+function getPostLoginFlowStartIndex(config, defaultIndex = 0) {
+  const gotoStepIndex = config.flow.findIndex((step, index) => index >= defaultIndex && step.action === 'goto');
+  return gotoStepIndex >= 0 ? gotoStepIndex : defaultIndex;
+}
+
+async function continueAuthenticatedSessionFlow(win, config, defaultStepIndex = 0) {
+  const timeoutMs = config.refresh.timeoutMs ?? 30000;
+  const dashboardLinkSelector = config.authState?.loggedInSelector
+    ? `${config.authState.loggedInSelector} a[href]`
+    : '';
+
+  if (dashboardLinkSelector && await selectorExists(win, dashboardLinkSelector)) {
+    log(`Continuing authenticated session through dashboard link selector: ${dashboardLinkSelector}`);
+
+    try {
+      await Promise.all([
+        waitForNextLoad(getManagedWebContents(win), timeoutMs),
+        clickElement(win, dashboardLinkSelector)
+      ]);
+    } catch (error) {
+      log(`Dashboard link click did not complete navigation cleanly; continuing with flow steps. ${error.message}`);
+    }
+  }
+
+  const stepStartIndex = getPostLoginFlowStartIndex(config, defaultStepIndex);
+  for (let stepIndex = stepStartIndex; stepIndex < config.flow.length; stepIndex += 1) {
+    await runStep(win, config.flow[stepIndex], config);
+  }
+
+  const targetUrl = getResolvedTargetUrlForConfig(config);
+  if (targetUrl && !matchesExpectedSteadyStateUrl(getManagedUrl(win), config)) {
+    throw new Error(`Authenticated-session flow landed on ${getManagedUrl(win)} instead of ${targetUrl}.`);
+  }
+}
+
 async function runFlow(win, config) {
   await navigateTo(win, resolveTemplate(config.startUrl, config), 30000);
 
@@ -1420,43 +1803,11 @@ async function runFlow(win, config) {
     if (authReadyState === 'logged-in') {
       log(`Existing session detected via selector: ${config.authState.loggedInSelector}`);
 
-      const targetUrl = resolveTemplate(config.targetUrl, config);
-      let existingSessionSucceeded = false;
-      if (targetUrl) {
-        try {
-          await navigateTo(win, targetUrl, config.refresh.timeoutMs ?? 30000);
-          if (targetUrl.includes('/Education/ViewAsset2.aspx')) {
-            await waitForUrlContains(win, '/Education/ViewAsset2.aspx', config.refresh.timeoutMs ?? 30000);
-          }
-          existingSessionSucceeded = true;
-        } catch (error) {
-          try {
-            const detectedDashboardHref = await getElementAttribute(
-              win,
-              `${config.authState.loggedInSelector} a[href]`,
-              'href'
-            );
-            const dashboardHref = detectedDashboardHref || getDashboardFallbackUrl(config);
-
-            if (!dashboardHref) {
-              throw error;
-            }
-
-            log(`Direct target navigation from existing session failed; falling back through dashboard link ${dashboardHref}`);
-            await navigateTo(win, dashboardHref, config.refresh.timeoutMs ?? 30000);
-            await navigateTo(win, targetUrl, config.refresh.timeoutMs ?? 30000);
-            if (targetUrl.includes('/Education/ViewAsset2.aspx')) {
-              await waitForUrlContains(win, '/Education/ViewAsset2.aspx', config.refresh.timeoutMs ?? 30000);
-            }
-            existingSessionSucceeded = true;
-          } catch (fallbackError) {
-            log(`Existing-session shortcut failed; falling back to the normal login flow. ${fallbackError.message}`);
-          }
-        }
-      }
-
-      if (existingSessionSucceeded) {
+      try {
+        await continueAuthenticatedSessionFlow(win, config, flowStartIndex);
         return;
+      } catch (error) {
+        log(`Existing-session shortcut failed; falling back to the normal login flow. ${error.message}`);
       }
 
       await navigateTo(win, resolveTemplate(config.startUrl, config), config.refresh.timeoutMs ?? 30000);
@@ -1493,7 +1844,7 @@ function startRefreshLoop(win) {
   log(`Starting refresh loop every ${intervalMs / 1000} seconds.`);
 
   refreshTimer = setInterval(async () => {
-    if (refreshInFlight || !win || win.isDestroyed()) {
+    if (refreshInFlight || !win || isManagedTargetDestroyed(win)) {
       return;
     }
 
@@ -1507,10 +1858,19 @@ function startRefreshLoop(win) {
 
       if (strategy === 'goto') {
         const refreshUrl = resolveTemplate(refreshConfig.url || currentConfig.targetUrl || currentConfig.startUrl, currentConfig);
-        await navigateTo(win, refreshUrl, timeoutMs);
+        const resolvedTargetUrl = getResolvedTargetUrlForConfig(currentConfig);
+        const shouldRefreshTargetViaDashboard = refreshUrl === resolvedTargetUrl
+          && matchesExpectedSteadyStateUrl(getManagedUrl(win), currentConfig);
+
+        if (shouldRefreshTargetViaDashboard) {
+          await continueAuthenticatedSessionFlow(win, currentConfig);
+        } else {
+          await navigateTo(win, refreshUrl, timeoutMs);
+        }
       } else {
-        const loadPromise = refreshConfig.waitForLoad ? waitForNextLoad(win.webContents, timeoutMs) : Promise.resolve();
-        win.webContents.reloadIgnoringCache();
+        const webContents = getManagedWebContents(win);
+        const loadPromise = refreshConfig.waitForLoad ? waitForNextLoad(webContents, timeoutMs) : Promise.resolve();
+        webContents.reloadIgnoringCache();
         await loadPromise;
       }
     } catch (error) {
@@ -1536,11 +1896,13 @@ async function applyConfig(nextConfig, options = {}) {
 
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.setSize(currentConfig.window.width, currentConfig.window.height);
-    await syncInfoPanel(mainWindow);
+    layoutMainWindow(mainWindow);
+    await syncInfoPanel(getMainContentTarget());
+    syncStatusBar();
 
     const blockedBySchedule = await enforceAccessSchedule();
     if (!blockedBySchedule && options.restartRefresh !== false) {
-      startRefreshLoop(mainWindow);
+      startRefreshLoop(getMainContentTarget());
     }
   }
 
@@ -1552,7 +1914,7 @@ async function captureCurrentUrlAsTarget() {
     throw new Error('Main window is not available.');
   }
 
-  const currentUrl = mainWindow.webContents.getURL();
+  const currentUrl = getManagedUrl(getMainContentTarget());
   if (!currentUrl || !/^https?:/i.test(currentUrl)) {
     throw new Error('The current page does not have a capturable HTTP URL.');
   }
@@ -1589,14 +1951,14 @@ async function navigateToSavedTarget() {
     throw new Error('Usage is currently blocked by the weekly schedule.');
   }
 
-  const targetUrl = resolveTemplate(currentConfig.targetUrl, currentConfig);
+  const targetUrl = getResolvedTargetUrlForConfig(currentConfig);
   if (!targetUrl) {
     throw new Error('No target URL has been configured.');
   }
 
-  await navigateTo(mainWindow, targetUrl, currentConfig.refresh.timeoutMs);
+  await navigateTo(getMainContentTarget(), targetUrl, currentConfig.refresh.timeoutMs);
   steadyStateMonitoring = true;
-  startRefreshLoop(mainWindow);
+  startRefreshLoop(getMainContentTarget());
   log(`Navigated to saved target URL: ${targetUrl}`);
   return currentConfig;
 }
@@ -1615,9 +1977,9 @@ async function restartAutomation() {
   stopRefreshLoop();
 
   try {
-    await runFlow(mainWindow, currentConfig);
+    await runFlow(getMainContentTarget(), currentConfig);
     steadyStateMonitoring = true;
-    startRefreshLoop(mainWindow);
+    startRefreshLoop(getMainContentTarget());
   } finally {
     automationInFlight = false;
   }
@@ -1697,6 +2059,18 @@ function buildApplicationMenu() {
             }));
           }
         },
+        {
+          label: 'Auto Restart After Schedule',
+          type: 'checkbox',
+          checked: currentConfig.accessSchedule?.restartNavigationWhenAllowed !== false,
+          click: async (menuItem) => {
+            await applyConfig(mergeConfig(currentConfig, {
+              accessSchedule: {
+                restartNavigationWhenAllowed: menuItem.checked
+              }
+            }), { restartRefresh: false });
+          }
+        },
         { type: 'separator' },
         {
           label: 'Capture Current URL as Target',
@@ -1749,6 +2123,19 @@ function registerIpcHandlers() {
   ipcMain.handle('settings:capture-target-url', async () => captureCurrentUrlAsTarget());
   ipcMain.handle('settings:navigate-to-target', async () => navigateToSavedTarget());
   ipcMain.handle('settings:restart-automation', async () => restartAutomation());
+  ipcMain.on('status-bar:toggle-target-panel', () => {
+    statusBarPanelVisible = !statusBarPanelVisible;
+    const contentTarget = getMainContentTarget();
+    if (contentTarget && !isManagedTargetDestroyed(contentTarget)) {
+      syncInfoPanel(contentTarget).catch((error) => {
+        log(`Info panel sync skipped: ${error.message}`);
+      });
+    }
+    syncStatusBar();
+  });
+  ipcMain.on('status-bar:request-state', () => {
+    syncStatusBar();
+  });
 }
 
 async function bootstrap() {
