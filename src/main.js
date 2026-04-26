@@ -10,6 +10,11 @@ const {
   powerSaveBlocker
 } = require('electron');
 
+if (app.isPackaged) {
+  const packagedUserDataPath = path.join(path.dirname(process.execPath), 'user-data');
+  app.setPath('userData', packagedUserDataPath);
+}
+
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
