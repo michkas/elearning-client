@@ -8,7 +8,7 @@
     "start": "electron .",
     "build": "electron-builder --win portable",
     "dist": "electron-builder --win nsis portable",
-    "package-win": "electron-packager . \"Voucher Webview App\" --platform=win32 --arch=x64 --out=dist-packager --overwrite"
+    "package-win": "electron-packager . \"Voucher Webview App\" --platform=win32 --arch=x64 --out=dist-packager --overwrite --ignore=^/app-config\\.json$"
   },
   "build": {
     "appId": "com.voucher.webviewapp",
@@ -18,7 +18,7 @@
     },
     "files": [
       "src/**/*",
-      "app-config.json",
+      "app-config.example.json",
       "package.json"
     ],
     "win": {

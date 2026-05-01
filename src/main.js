@@ -10,9 +10,15 @@ const {
   powerSaveBlocker
 } = require('electron');
 
+const PACKAGED_APP_BASE_PATH = app.isPackaged
+  ? (process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(process.execPath))
+  : null;
+const PACKAGED_USER_DATA_PATH = app.isPackaged
+  ? path.join(PACKAGED_APP_BASE_PATH, 'user-data')
+  : null;
+
 if (app.isPackaged) {
-  const packagedUserDataPath = path.join(path.dirname(process.execPath), 'user-data');
-  app.setPath('userData', packagedUserDataPath);
+  app.setPath('userData', PACKAGED_USER_DATA_PATH);
 }
 
 app.commandLine.appendSwitch('disable-background-timer-throttling');
@@ -20,11 +26,16 @@ app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
 
-const CONFIG_PATH = path.join(__dirname, '..', 'app-config.json');
+const CONFIG_TEMPLATE_PATH = path.join(__dirname, '..', 'app-config.example.json');
+const LEGACY_PACKAGED_CONFIG_PATH = path.join(__dirname, '..', 'app-config.json');
+const CONFIG_PATH = app.isPackaged
+  ? path.join(PACKAGED_USER_DATA_PATH, 'app-config.json')
+  : path.join(__dirname, '..', 'app-config.json');
 const SESSION_PARTITION = 'persist:voucher-app';
 const SETTINGS_WINDOW_FILE = path.join(__dirname, 'settings.html');
 const BLANK_SCREEN_IDLE_THRESHOLD_MS = 2 * 60 * 1000;
 const BLANK_SCREEN_CHECK_INTERVAL_MS = 15 * 1000;
+const STREAMING_CONFLICT_CHECK_INTERVAL_MS = 3000;
 const LOG_FILE_NAME = 'voucher-webview-app.log';
 const SESSION_STARTED_AT = new Date();
 const STATUS_BAR_HEIGHT = 44;
@@ -36,7 +47,9 @@ let settingsWindow;
 let refreshTimer;
 let scheduleTimer;
 let blankScreenTimer;
+let streamingConflictMonitorTimer;
 let powerBlockerId;
+let ghostParallelNavigationTriggered = false;
 let refreshInFlight = false;
 let automationInFlight = false;
 let steadyStateMonitoring = false;
@@ -371,6 +384,40 @@ function mergeConfig(baseConfig, updates) {
   });
 }
 
+function ensurePackagedConfigExists() {
+  if (!app.isPackaged || fs.existsSync(CONFIG_PATH)) {
+    return;
+  }
+
+  const candidatePaths = [CONFIG_TEMPLATE_PATH, LEGACY_PACKAGED_CONFIG_PATH];
+
+  for (const candidatePath of candidatePaths) {
+    try {
+      if (!fs.existsSync(candidatePath)) {
+        continue;
+      }
+
+      const raw = fs.readFileSync(candidatePath, 'utf8');
+      const templateConfig = normalizeConfig(JSON.parse(raw));
+      const sanitizedConfig = {
+        ...templateConfig,
+        credentials: {
+          ...templateConfig.credentials,
+          username: '',
+          password: ''
+        }
+      };
+
+      fs.writeFileSync(CONFIG_PATH, `${JSON.stringify(sanitizedConfig, null, 2)}\n`, 'utf8');
+      return;
+    } catch (error) {
+      console.error(`[${new Date().toISOString()}] Failed to initialize packaged config from ${candidatePath}: ${error.message}`);
+    }
+  }
+
+  throw new Error('Unable to initialize packaged app-config.json.');
+}
+
 function readConfig() {
   const raw = fs.readFileSync(CONFIG_PATH, 'utf8');
   return normalizeConfig(JSON.parse(raw));
@@ -494,6 +541,17 @@ function getDashboardFallbackUrl(config) {
   }
 
   return dashboardUrl.toString();
+}
+
+function getAuthStateSelectors(config) {
+  const loggedInSelector = String(config.authState?.loggedInSelector ?? '').trim();
+  const loginStep = config.flow.find((step) => step.action === 'type' && step.selector);
+  const loginSelector = loginStep ? resolveTemplate(loginStep.selector, config) : '';
+
+  return {
+    loggedInSelector,
+    loginSelector
+  };
 }
 
 function formatDateTime(date) {
@@ -974,27 +1032,38 @@ async function scheduleSessionRecovery(reason, rawUrl, options = {}) {
   }
 }
 
-function monitorSessionState(rawUrl) {
+async function monitorSessionState(rawUrl) {
   if (!steadyStateMonitoring || automationInFlight || !currentConfig.sessionRecovery?.enabled || currentConfig.refresh?.enabled === false) {
     return;
   }
 
-  if (isExpectedSteadyStateUrl(rawUrl)) {
+  const authState = await detectCurrentAuthReadyState(getMainContentTarget(), currentConfig);
+  const liveUrl = getManagedUrl(getMainContentTarget());
+  if (!liveUrl || liveUrl !== rawUrl || automationInFlight || recoveryInFlight || !steadyStateMonitoring) {
+    return;
+  }
+
+  const loginFormDetected = authState === 'login-form';
+
+  if (isExpectedSteadyStateUrl(rawUrl) && !loginFormDetected) {
     return;
   }
 
   const currentUrl = parseUrl(rawUrl);
   const startUrl = parseUrl(resolveTemplate(currentConfig.startUrl, currentConfig));
   const navigationContext = describeNavigationContext(rawUrl);
-  const reason = navigationContext.redirectedToStart
-    ? 'redirected to the start/login page'
-    : navigationContext.redirectedToDashboard
-      ? `redirected to the dashboard instead of ${navigationContext.targetPath || 'the saved target path'}`
-      : `unexpected navigation to ${rawUrl}`;
+  const reason = loginFormDetected
+    ? `login form detected after navigation to ${rawUrl}`
+    : navigationContext.redirectedToStart
+      ? 'redirected to the start/login page'
+      : navigationContext.redirectedToDashboard
+        ? `redirected to the dashboard instead of ${navigationContext.targetPath || 'the saved target path'}`
+        : `unexpected navigation to ${rawUrl}`;
 
   const detailParts = [
     `path=${navigationContext.currentPath || 'unknown'}`,
-    `sameOriginAsTarget=${navigationContext.sameOriginAsTarget}`
+    `sameOriginAsTarget=${navigationContext.sameOriginAsTarget}`,
+    `authState=${authState}`
   ];
 
   if (navigationContext.targetPath) {
@@ -1007,8 +1076,9 @@ function monitorSessionState(rawUrl) {
 
   log(`Unexpected steady-state navigation observed: ${detailParts.join(', ')}.`);
 
-  scheduleSessionRecovery(reason, rawUrl, {
-    mode: navigationContext.redirectedToStart
+  await scheduleSessionRecovery(reason, rawUrl, {
+    mode: loginFormDetected
+      || navigationContext.redirectedToStart
       || (navigationContext.redirectedToDashboard && currentConfig.sessionRecovery.dashboardRedirectRestart !== false)
       ? 'restart'
       : 'target'
@@ -1378,6 +1448,293 @@ async function syncInfoPanel(win) {
   }
 }
 
+async function installStreamingConflictAutoConfirm(win) {
+  if (!win || isManagedTargetDestroyed(win)) {
+    return false;
+  }
+
+  try {
+    return await executeInPage(
+      win,
+      () => {
+        const CONFIRM_TEXTS = ['ναι', 'yes'];
+        const STREAMING_CONFLICT_TEXTS = ['ενεργή παρακολούθηση', 'active', 'stream'];
+
+        const isVisible = (view, element) => {
+          if (!(element instanceof view.Element)) {
+            return false;
+          }
+
+          const style = view.getComputedStyle(element);
+          if (style.display === 'none' || style.visibility === 'hidden') {
+            return false;
+          }
+
+          const rect = element.getBoundingClientRect();
+          return rect.width > 0 || rect.height > 0 || style.position === 'fixed';
+        };
+
+        const getReachableDocuments = () => {
+          const documents = [document];
+          const frames = Array.from(document.querySelectorAll('iframe, frame'));
+
+          for (const frameElement of frames) {
+            try {
+              const frameDocument = frameElement.contentWindow?.document;
+              if (frameDocument?.documentElement) {
+                documents.push(frameDocument);
+              }
+            } catch (_error) {
+              // Ignore cross-origin frames.
+            }
+          }
+
+          return documents;
+        };
+
+        const tryConfirmInDocument = (activeDocument) => {
+          const activeWindow = activeDocument.defaultView;
+          if (!activeWindow) {
+            return false;
+          }
+
+          const dialogs = Array.from(activeDocument.querySelectorAll('.bootbox.modal, .bootbox-confirm, .modal.bootbox-confirm, [role="dialog"].bootbox'));
+
+          for (const dialog of dialogs) {
+            if (!isVisible(activeWindow, dialog)) {
+              continue;
+            }
+
+            const dialogText = (dialog.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+            if (!dialogText) {
+              continue;
+            }
+
+            const confirmButton = dialog.querySelector('[data-bb-handler="confirm"], .modal-footer .btn-primary, .bootbox-accept, button.btn-primary');
+            if (!(confirmButton instanceof activeWindow.HTMLElement) || !isVisible(activeWindow, confirmButton) || confirmButton.disabled) {
+              continue;
+            }
+
+            const buttonText = (confirmButton.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+            const looksLikeConfirmButton = confirmButton.getAttribute('data-bb-handler') === 'confirm'
+              || CONFIRM_TEXTS.includes(buttonText)
+              || confirmButton.classList.contains('btn-primary');
+
+            const looksLikeStreamingConflict = STREAMING_CONFLICT_TEXTS.some((text) => dialogText.includes(text));
+
+            if (!looksLikeConfirmButton || !looksLikeStreamingConflict) {
+              continue;
+            }
+
+            confirmButton.dispatchEvent(new activeWindow.MouseEvent('mousedown', { bubbles: true }));
+            confirmButton.dispatchEvent(new activeWindow.MouseEvent('mouseup', { bubbles: true }));
+            confirmButton.click();
+            return true;
+          }
+
+          return false;
+        };
+
+        const tryConfirm = () => {
+          for (const activeDocument of getReachableDocuments()) {
+            if (tryConfirmInDocument(activeDocument)) {
+              return true;
+            }
+          }
+
+          return false;
+        };
+
+        return tryConfirm();
+      }
+    );
+  } catch (error) {
+    log(`Streaming-conflict auto-confirm skipped: ${error.message}`);
+    return false;
+  }
+}
+
+async function triggerGhostParallelNavigation(win, rawUrl) {
+  if (!win || isManagedTargetDestroyed(win) || !rawUrl) {
+    return false;
+  }
+
+  try {
+    return await executeInPage(
+      win,
+      (targetUrl) => {
+        const ghostUrl = new URL(targetUrl, window.location.href);
+        ghostUrl.searchParams.set('voucherGhost', '1');
+        ghostUrl.searchParams.set('_', String(Date.now()));
+
+        const iframe = document.createElement('iframe');
+        iframe.setAttribute('aria-hidden', 'true');
+        iframe.tabIndex = -1;
+        iframe.src = ghostUrl.toString();
+        iframe.style.position = 'fixed';
+        iframe.style.left = '-99999px';
+        iframe.style.top = '0';
+        iframe.style.width = '1px';
+        iframe.style.height = '1px';
+        iframe.style.opacity = '0';
+        iframe.style.pointerEvents = 'none';
+        iframe.style.border = '0';
+
+        const cleanup = () => {
+          window.setTimeout(() => {
+            iframe.remove();
+          }, 15000);
+        };
+
+        iframe.addEventListener('load', cleanup, { once: true });
+        iframe.addEventListener('error', cleanup, { once: true });
+        (document.body || document.documentElement).appendChild(iframe);
+        return ghostUrl.toString();
+      },
+      rawUrl
+    );
+  } catch (error) {
+    log(`Ghost parallel navigation failed: ${error.message}`);
+    return false;
+  }
+}
+
+async function detectIframeNavigationButtons(win) {
+  if (!win || isManagedTargetDestroyed(win)) {
+    return [];
+  }
+
+  try {
+    return await executeInPage(
+      win,
+      () => {
+        const LABELS = {
+          next: ['επόμενο'],
+          previous: ['προηγούμενο']
+        };
+
+        const normalizeText = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+        const isVisible = (view, element) => {
+          if (!(element instanceof view.Element)) {
+            return false;
+          }
+
+          const style = view.getComputedStyle(element);
+          if (style.display === 'none' || style.visibility === 'hidden') {
+            return false;
+          }
+
+          const rect = element.getBoundingClientRect();
+          return rect.width > 0 || rect.height > 0;
+        };
+
+        const getReachableDocuments = () => {
+          const documents = [{ kind: 'top', document }];
+          const frames = Array.from(document.querySelectorAll('iframe, frame'));
+
+          frames.forEach((frameElement, index) => {
+            try {
+              const frameDocument = frameElement.contentWindow?.document;
+              if (frameDocument?.documentElement) {
+                documents.push({ kind: 'iframe', index, document: frameDocument });
+              }
+            } catch (_error) {
+              // Ignore cross-origin frames.
+            }
+          });
+
+          return documents;
+        };
+
+        const candidatesSelector = 'button, a, input[type="button"], input[type="submit"], [role="button"], .btn';
+        const results = [];
+
+        for (const source of getReachableDocuments()) {
+          const activeDocument = source.document;
+          const activeWindow = activeDocument.defaultView;
+          if (!activeWindow) {
+            continue;
+          }
+
+          const candidates = Array.from(activeDocument.querySelectorAll(candidatesSelector));
+          for (const candidate of candidates) {
+            if (!isVisible(activeWindow, candidate)) {
+              continue;
+            }
+
+            const label = normalizeText(
+              candidate.textContent
+                || candidate.innerText
+                || candidate.getAttribute?.('aria-label')
+                || candidate.getAttribute?.('title')
+                || candidate.value
+            );
+
+            if (!label) {
+              continue;
+            }
+
+            for (const [kind, texts] of Object.entries(LABELS)) {
+              if (!texts.some((text) => label.includes(text))) {
+                continue;
+              }
+
+              results.push({
+                kind,
+                label,
+                tagName: candidate.tagName.toLowerCase(),
+                frame: source.kind === 'iframe' ? source.index : -1,
+                href: candidate.getAttribute?.('href') || '',
+                id: candidate.id || '',
+                className: typeof candidate.className === 'string' ? candidate.className : ''
+              });
+            }
+          }
+        }
+
+        return results;
+      }
+    );
+  } catch (error) {
+    log(`Iframe navigation button detection skipped: ${error.message}`);
+    return [];
+  }
+}
+
+function stopStreamingConflictMonitor() {
+  if (streamingConflictMonitorTimer) {
+    clearInterval(streamingConflictMonitorTimer);
+    streamingConflictMonitorTimer = undefined;
+  }
+}
+
+function startStreamingConflictMonitor(win) {
+  stopStreamingConflictMonitor();
+
+  streamingConflictMonitorTimer = setInterval(() => {
+    if (!win || isManagedTargetDestroyed(win) || accessBlocked) {
+      return;
+    }
+
+    if (Date.now() - lastWindowActivityAt < 1500) {
+      return;
+    }
+
+    installStreamingConflictAutoConfirm(win)
+      .then((resolved) => {
+        if (!resolved) {
+          return;
+        }
+
+        log('Streaming-conflict modal detected and confirmed automatically.');
+      })
+      .catch((error) => {
+        log(`Streaming-conflict auto-confirm skipped: ${error.message}`);
+      });
+  }, STREAMING_CONFLICT_CHECK_INTERVAL_MS);
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: currentConfig.window.width,
@@ -1419,6 +1776,7 @@ function createWindow() {
   });
 
   mainContentView.webContents.on('did-start-loading', () => {
+    stopStreamingConflictMonitor();
     markWindowActivity();
     log(`Loading ${mainContentView.webContents.getURL() || 'pending URL'} ...`);
   });
@@ -1427,6 +1785,32 @@ function createWindow() {
     markWindowActivity();
     const currentUrl = mainContentView.webContents.getURL();
     log(`Loaded ${currentUrl}`);
+    const streamingConflictResolved = await installStreamingConflictAutoConfirm(mainContentView);
+    if (streamingConflictResolved) {
+      log('Streaming-conflict modal detected and confirmed automatically.');
+    }
+
+    if (!ghostParallelNavigationTriggered && currentUrl.includes('/Education/ViewAsset2.aspx')) {
+      ghostParallelNavigationTriggered = true;
+      const ghostUrl = await triggerGhostParallelNavigation(mainContentView, currentUrl);
+      if (ghostUrl) {
+        log(`Ghost parallel navigation submitted: ${ghostUrl}`);
+      }
+    }
+
+    if (currentUrl.includes('/Education/ViewAsset2.aspx')) {
+      const navigationButtons = await detectIframeNavigationButtons(mainContentView);
+      if (navigationButtons.length > 0) {
+        const summary = navigationButtons
+          .map((button) => `${button.kind}@${button.frame}:${button.tagName}:${button.label}`)
+          .join(' | ');
+        log(`Iframe navigation buttons detected: ${summary}`);
+      } else {
+        log('Iframe navigation buttons not detected on current asset page.');
+      }
+    }
+
+    startStreamingConflictMonitor(mainContentView);
     await syncInfoPanel(mainContentView);
     syncStatusBar();
     monitorSessionState(currentUrl);
@@ -1585,9 +1969,7 @@ async function getElementAttribute(win, selector, attributeName) {
 }
 
 async function waitForAuthReadyState(win, config, timeoutMs) {
-  const loggedInSelector = config.authState?.loggedInSelector;
-  const loginStep = config.flow.find((step) => step.action === 'type' && step.selector);
-  const loginSelector = loginStep ? resolveTemplate(loginStep.selector, config) : '';
+  const { loggedInSelector, loginSelector } = getAuthStateSelectors(config);
 
   if (!loggedInSelector && !loginSelector) {
     return 'unknown';
@@ -1615,6 +1997,24 @@ async function waitForAuthReadyState(win, config, timeoutMs) {
   }
 
   throw new Error(`Neither an active-session selector nor the login form became available within ${timeoutMs}ms.`);
+}
+
+async function detectCurrentAuthReadyState(win, config) {
+  const { loggedInSelector, loginSelector } = getAuthStateSelectors(config);
+
+  if (!loggedInSelector && !loginSelector) {
+    return 'unknown';
+  }
+
+  if (loggedInSelector && await selectorExists(win, loggedInSelector)) {
+    return 'logged-in';
+  }
+
+  if (loginSelector && await selectorExists(win, loginSelector)) {
+    return 'login-form';
+  }
+
+  return 'unknown';
 }
 
 async function setElementValue(win, selector, value, clearFirst) {
@@ -1892,6 +2292,33 @@ function notifySettingsWindow() {
   }
 }
 
+function hasConfiguredUsername(config = currentConfig) {
+  return Boolean(String(config?.credentials?.username ?? '').trim());
+}
+
+async function promptForMissingCredentials() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return false;
+  }
+
+  const response = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    buttons: ['Open Settings', 'Cancel'],
+    defaultId: 0,
+    cancelId: 1,
+    title: 'Configuration Required',
+    message: 'Set up account credentials before running automation.',
+    detail: 'No username is configured yet. Open Settings and enter the account details before the app tries to navigate and log in.'
+  });
+
+  if (response.response === 0) {
+    openSettingsWindow();
+    return true;
+  }
+
+  return false;
+}
+
 async function applyConfig(nextConfig, options = {}) {
   currentConfig = normalizeConfig(nextConfig);
   writeConfig(currentConfig);
@@ -1970,6 +2397,12 @@ async function navigateToSavedTarget() {
 
 async function restartAutomation() {
   if (automationInFlight) {
+    return;
+  }
+
+  if (!hasConfiguredUsername()) {
+    await promptForMissingCredentials();
+    log('Automation skipped because no username is configured.');
     return;
   }
 
@@ -2144,6 +2577,7 @@ function registerIpcHandlers() {
 }
 
 async function bootstrap() {
+  ensurePackagedConfigExists();
   currentConfig = readConfig();
   buildApplicationMenu();
   registerIpcHandlers();
@@ -2183,6 +2617,7 @@ app.on('window-all-closed', () => {
   stopRefreshLoop();
   stopScheduleMonitor();
   stopBlankScreenMonitor();
+  stopStreamingConflictMonitor();
 
   if (powerSaveBlocker.isStarted(powerBlockerId ?? -1)) {
     powerSaveBlocker.stop(powerBlockerId);

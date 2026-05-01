@@ -1,5 +1,9 @@
 node_modules/
 npm-debug.log*
 dist/
+dist-fresh/
 dist-packager/
+dist-rebuilt/
 app-config.json
+user-data/
+*.log
